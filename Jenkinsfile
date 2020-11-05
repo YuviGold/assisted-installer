@@ -16,6 +16,12 @@ pipeline {
         steps {
             sh 'skipper make'
         }
+        post {
+            always {
+                junit '**/reports/*test.xml'
+                cobertura coberturaReportFile: '**/reports/*coverage.xml', onlyStable: false, enableNewApi: true
+            }
+        }
     }
 
     stage('publish images on push to master') {
@@ -39,9 +45,9 @@ pipeline {
     }
   }
   post {
-    failure {
+    always {
         script {
-            if (env.BRANCH_NAME == 'master')
+           if ((env.BRANCH_NAME == 'master') && (currentBuild.currentResult == "ABORTED" || currentBuild.currentResult == "FAILURE")){
                 stage('notify master branch fail') {
                     withCredentials([string(credentialsId: 'slack-token', variable: 'TOKEN')]) {
                         sh '''
@@ -53,6 +59,7 @@ pipeline {
 
                     }
                 }
+           }
         }
     }
   }

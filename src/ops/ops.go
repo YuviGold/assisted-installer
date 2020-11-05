@@ -27,7 +27,7 @@ type Ops interface {
 	ExecPrivilegeCommand(liveLogger io.Writer, command string, args ...string) (string, error)
 	ExecCommand(liveLogger io.Writer, command string, args ...string) (string, error)
 	Mkdir(dirName string) error
-	WriteImageToDisk(ignitionPath string, device string, image string, progressReporter inventory_client.InventoryClient) error
+	WriteImageToDisk(ignitionPath string, device string, progressReporter inventory_client.InventoryClient) error
 	Reboot() error
 	ExtractFromIgnition(ignitionPath string, fileToExtract string) error
 	SetFileInIgnition(ignitionPath, filePath, contents string, mode int) error
@@ -39,6 +39,7 @@ type Ops interface {
 	RemovePV(pvName string) error
 	GetMCSLogs() (string, error)
 	UploadInstallationLogs(isBootstrap bool) (string, error)
+	ReloadHostFile(filepath string) error
 }
 
 const (
@@ -59,9 +60,9 @@ type ops struct {
 }
 
 // NewOps return a new ops interface
-func NewOps(logger *logrus.Logger) Ops {
+func NewOps(logger *logrus.Logger, proxySet bool) Ops {
 	cmdEnv := os.Environ()
-	if config.GlobalConfig.HTTPProxy != "" || config.GlobalConfig.HTTPSProxy != "" {
+	if proxySet && (config.GlobalConfig.HTTPProxy != "" || config.GlobalConfig.HTTPSProxy != "") {
 		if config.GlobalConfig.HTTPProxy != "" {
 			cmdEnv = append(cmdEnv, fmt.Sprintf("HTTP_PROXY=%s", config.GlobalConfig.HTTPProxy))
 		}
@@ -109,15 +110,15 @@ func (o *ops) ExecCommand(liveLogger io.Writer, command string, args ...string) 
 
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-				o.log.Debugf("failed executing %s %v, out: %s, with status %d",
-					command, args, output, status.ExitStatus())
+				o.log.Debugf("failed executing %s %v, env vars %v, out: %s, with status %d",
+					command, args, output, cmd.Env, status.ExitStatus())
 
-				return output, fmt.Errorf("failed executing %s %v , error %s. Output %s", command, args, exitErr, output)
+				return output, fmt.Errorf("failed executing %s %v, env vars %v, error %s. Output %s", command, args, cmd.Env, exitErr, output)
 			}
 		}
-		return output, fmt.Errorf("failed executing %s %v , error %s. Output %s", command, args, err, output)
+		return output, fmt.Errorf("failed executing %s %v, env vars %v, error %s. Output %s", command, args, cmd.Env, err, output)
 	}
-	o.log.Debug("Command executed:", " command", command, " arguments", args, " output", output)
+	o.log.Debug("Command executed:", " command", command, " arguments", args, "env vars", cmd.Env, "output", output)
 	return output, err
 }
 
@@ -136,10 +137,10 @@ func (o *ops) SystemctlAction(action string, args ...string) error {
 	return err
 }
 
-func (o *ops) WriteImageToDisk(ignitionPath string, device string, image string, progressReporter inventory_client.InventoryClient) error {
+func (o *ops) WriteImageToDisk(ignitionPath string, device string, progressReporter inventory_client.InventoryClient) error {
 	o.log.Info("Writing image and ignition to disk")
 	_, err := o.ExecPrivilegeCommand(NewCoreosInstallerLogWriter(o.log, progressReporter, config.GlobalConfig.HostID),
-		"coreos-installer", "install", "--image-url", image, "--insecure", "-i", ignitionPath, device)
+		"coreos-installer", "install", "--insecure", "-i", ignitionPath, device)
 	return err
 }
 func (o *ops) Reboot() error {
@@ -243,7 +244,7 @@ func (o *ops) PrepareController() error {
 }
 
 func (o *ops) renderControllerCm() error {
-	var params = map[string]string{
+	var params = map[string]interface{}{
 		"InventoryUrl":         config.GlobalConfig.URL,
 		"ClusterId":            config.GlobalConfig.ClusterID,
 		"SkipCertVerification": strconv.FormatBool(config.GlobalConfig.SkipCertVerification),
@@ -255,7 +256,7 @@ func (o *ops) renderControllerCm() error {
 }
 
 func (o *ops) renderControllerSecret() error {
-	var params = map[string]string{
+	var params = map[string]interface{}{
 		"PullSecretToken": config.GlobalConfig.PullSecretToken,
 	}
 
@@ -264,15 +265,20 @@ func (o *ops) renderControllerSecret() error {
 }
 
 func (o *ops) renderControllerPod() error {
-	var params = map[string]string{
+	var params = map[string]interface{}{
 		"ControllerImage": config.GlobalConfig.ControllerImage,
+		"CACertPath":      config.GlobalConfig.CACertPath,
+	}
+
+	if config.GlobalConfig.ServiceIPs != "" {
+		params["ServiceIPs"] = strings.Split(config.GlobalConfig.ServiceIPs, ",")
 	}
 
 	return o.renderDeploymentFiles(filepath.Join(controllerDeployFolder, controllerDeployPodTemplate),
 		params, renderedControllerPod)
 }
 
-func (o *ops) renderDeploymentFiles(srcTemplate string, params map[string]string, dest string) error {
+func (o *ops) renderDeploymentFiles(srcTemplate string, params map[string]interface{}, dest string) error {
 	templateData, err := ioutil.ReadFile(srcTemplate)
 	if err != nil {
 		o.log.Errorf("Error occurred while trying to read %s : %e", srcTemplate, err)
@@ -383,4 +389,30 @@ func (o *ops) UploadInstallationLogs(isBootstrap bool) (string, error) {
 		args = append(args, fmt.Sprintf("-cacert=%s", config.GlobalConfig.CACertPath))
 	}
 	return o.ExecPrivilegeCommand(o.logWriter, command, args...)
+}
+
+// Sometimes we will need to reload container files from host
+// For example /etc/resolv.conf, it can't be changed with Z flag but is updated by bootkube.sh
+// and we need this update for dns resolve of kubeapi
+func (o *ops) ReloadHostFile(filepath string) error {
+	o.log.Infof("Reloading %s", filepath)
+	output, err := o.ExecPrivilegeCommand(o.logWriter, "cat", filepath)
+	if err != nil {
+		o.log.Errorf("Failed to read %s on the host", filepath)
+		return err
+	}
+	f, err := os.OpenFile(filepath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	defer func() {
+		_ = f.Close()
+	}()
+	if err != nil {
+		o.log.Errorf("Failed to open local %s", filepath)
+		return err
+	}
+	_, err = f.WriteString(output)
+	if err != nil {
+		o.log.Errorf("Failed to write host %s data to local", filepath)
+		return err
+	}
+	return nil
 }

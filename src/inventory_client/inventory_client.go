@@ -6,18 +6,23 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
+	"syscall"
 	"time"
+
+	"github.com/go-openapi/runtime"
 
 	"github.com/thoas/go-funk"
 
+	"github.com/PuerkitoBio/rehttp"
 	"github.com/go-openapi/strfmt"
 	"github.com/openshift/assisted-installer/src/utils"
-
 	"github.com/openshift/assisted-service/client"
 	"github.com/openshift/assisted-service/client/installer"
 	"github.com/openshift/assisted-service/models"
@@ -27,9 +32,9 @@ import (
 )
 
 const (
-	retryDelay    = time.Duration(2) * time.Second
-	retryMaxDelay = time.Duration(10) * time.Second
-	MaxTries      = 10
+	defaultRetryMinDelay = time.Duration(2) * time.Second
+	defaultRetryMaxDelay = time.Duration(10) * time.Second
+	defaultMaxRetries    = 10
 )
 
 //go:generate mockgen -source=inventory_client.go -package=inventory_client -destination=mock_inventory_client.go
@@ -41,6 +46,7 @@ type InventoryClient interface {
 	GetCluster() (*models.Cluster, error)
 	CompleteInstallation(clusterId string, isSuccess bool, errorInfo string) error
 	GetHosts(skippedStatuses []string) (map[string]HostData, error)
+	UploadLogs(clusterId string, logsType models.LogsType, upfile io.Reader) error
 }
 
 type inventoryClient struct {
@@ -55,7 +61,15 @@ type HostData struct {
 	Host      *models.Host
 }
 
-func CreateInventoryClient(clusterId string, inventoryURL string, pullSecret string, insecure bool, caPath string, logger *logrus.Logger) (*inventoryClient, error) {
+func CreateInventoryClient(clusterId string, inventoryURL string, pullSecret string, insecure bool, caPath string,
+	logger *logrus.Logger, proxyFunc func(*http.Request) (*url.URL, error)) (*inventoryClient, error) {
+	return CreateInventoryClientWithDelay(clusterId, inventoryURL, pullSecret, insecure, caPath,
+		logger, proxyFunc, defaultRetryMinDelay, defaultRetryMaxDelay, defaultMaxRetries)
+}
+
+func CreateInventoryClientWithDelay(clusterId string, inventoryURL string, pullSecret string, insecure bool, caPath string,
+	logger *logrus.Logger, proxyFunc func(*http.Request) (*url.URL, error),
+	retryMinDelay, retryMaxDelay time.Duration, maxRetries int) (*inventoryClient, error) {
 	clientConfig := client.Config{}
 	var err error
 	clientConfig.URL, err = url.ParseRequestURI(createUrl(inventoryURL))
@@ -74,7 +88,7 @@ func CreateInventoryClient(clusterId string, inventoryURL string, pullSecret str
 	}
 
 	transport := requestid.Transport(&http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy: proxyFunc,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -90,16 +104,44 @@ func CreateInventoryClient(clusterId string, inventoryURL string, pullSecret str
 		},
 	})
 	// Add retry settings
+	tr := rehttp.NewTransport(
+		transport,
+		rehttp.RetryAny(
+			rehttp.RetryAll(
+				rehttp.RetryMaxRetries(maxRetries),
+				rehttp.RetryStatusInterval(400, 600),
+			),
+			rehttp.RetryAll(
+				rehttp.RetryMaxRetries(maxRetries),
+				rehttp.RetryTemporaryErr(),
+			),
+			rehttp.RetryAll(
+				rehttp.RetryMaxRetries(maxRetries),
+				RetryConnectionRefusedErr(),
+			),
+		),
+		rehttp.ExpJitterDelay(retryMinDelay, retryMaxDelay),
+	)
 
-	clientConfig.Transport = RetryRoundTripper{transport,
-		logger,
-		retryDelay,
-		retryMaxDelay,
-		MaxTries}
+	clientConfig.Transport = tr
 
 	clientConfig.AuthInfo = auth.AgentAuthHeaderWriter(pullSecret)
 	assistedInstallClient := client.New(clientConfig)
 	return &inventoryClient{logger, assistedInstallClient, strfmt.UUID(clusterId)}, nil
+}
+
+func RetryConnectionRefusedErr() rehttp.RetryFn {
+	return func(attempt rehttp.Attempt) bool {
+		if operr, ok := attempt.Error.(*net.OpError); ok {
+			if syserr, ok := operr.Err.(*os.SyscallError); ok {
+				if syserr.Err == syscall.ECONNREFUSED {
+					return true
+				}
+			}
+		}
+
+		return false
+	}
 }
 
 func readCACertificate(capath string, logger *logrus.Logger) (*x509.CertPool, error) {
@@ -168,7 +210,7 @@ func (c *inventoryClient) GetHosts(skippedStatuses []string) (map[string]HostDat
 		return nil, err
 	}
 	for _, hostData := range hosts {
-		hostname := hostData.Host.RequestedHostname
+		hostname := strings.ToLower(hostData.Host.RequestedHostname)
 		ips, err := utils.GetHostIpsFromInventory(hostData.Inventory)
 		if err != nil {
 			c.log.WithError(err).Errorf("failed to get ips of node %s", hostname)
@@ -229,5 +271,13 @@ func (c *inventoryClient) CompleteInstallation(clusterId string, isSuccess bool,
 	_, err := c.ai.Installer.CompleteInstallation(context.Background(),
 		&installer.CompleteInstallationParams{ClusterID: strfmt.UUID(clusterId),
 			CompletionParams: &models.CompletionParams{IsSuccess: &isSuccess, ErrorInfo: errorInfo}})
+	return err
+}
+
+func (c *inventoryClient) UploadLogs(clusterId string, logsType models.LogsType, upfile io.Reader) error {
+	fileName := fmt.Sprintf("%s_logs.tar.gz", string(logsType))
+	_, err := c.ai.Installer.UploadLogs(context.Background(),
+		&installer.UploadLogsParams{ClusterID: strfmt.UUID(clusterId), LogsType: string(logsType),
+			Upfile: runtime.NamedReader(fileName, upfile)})
 	return err
 }

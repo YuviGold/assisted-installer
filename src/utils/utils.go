@@ -1,15 +1,23 @@
 package utils
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
+	"github.com/pkg/errors"
+
 	"github.com/openshift/assisted-installer-agent/pkg/journalLogger"
+	"golang.org/x/net/http/httpproxy"
 
 	ignition "github.com/coreos/ignition/v2/config/v3_1"
 	"github.com/coreos/ignition/v2/config/v3_1/types"
@@ -18,6 +26,11 @@ import (
 	"github.com/vincent-petithory/dataurl"
 
 	"github.com/sirupsen/logrus"
+)
+
+var (
+	envProxyOnce          sync.Once
+	envVarsProxyFuncValue func(*url.URL) (*url.URL, error)
 )
 
 type LogWriter struct {
@@ -173,4 +186,70 @@ func GetHostIpsFromInventory(inventory *models.Inventory) ([]string, error) {
 		}
 	}
 	return ips, nil
+}
+
+func WriteToTarGz(w io.Writer, reader io.Reader, sizeOfData int64, fileName string) error {
+	// now lets create the header as needed for this file within the tarball
+	gw := gzip.NewWriter(w)
+	defer gw.Close()
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+	header := tar.Header{
+		Name:    fileName,
+		Size:    sizeOfData,
+		Mode:    0644,
+		ModTime: time.Now(),
+	}
+	// write the header to the tarball archive
+	if err := tw.WriteHeader(&header); err != nil {
+		return err
+	}
+	// copy the file data to the tarball
+	if _, err := io.Copy(tw, reader); err != nil {
+		return err
+	}
+	return nil
+}
+
+func WaitForPredicate(timeout time.Duration, interval time.Duration, predicate func() bool) error {
+	timeoutAfter := time.After(timeout)
+	ticker := time.NewTicker(interval)
+	// Keep trying until we're time out or get true
+	for {
+		select {
+		// Got a timeout! fail with a timeout error
+		case <-timeoutAfter:
+			return errors.New("timed out")
+		// Got a tick, we should check on checkSomething()
+		case <-ticker.C:
+			if predicate() {
+				return nil
+			}
+		}
+	}
+}
+
+// ProxyFromEnvVars provides an alternative to http.ProxyFromEnvironment since it is being initialized only
+// once and that happens by k8s before proxy settings was obtained. While this is no issue for k8s, it prevents
+// any out-of-cluster traffic from using the proxy
+func ProxyFromEnvVars(req *http.Request) (*url.URL, error) {
+	return envVarsProxyFunc()(req.URL)
+}
+
+func envVarsProxyFunc() func(*url.URL) (*url.URL, error) {
+	envProxyOnce.Do(func() {
+		config := &httpproxy.Config{
+			HTTPProxy:  os.Getenv("HTTP_PROXY"),
+			HTTPSProxy: os.Getenv("HTTPS_PROXY"),
+			NoProxy:    os.Getenv("NO_PROXY"),
+			CGI:        os.Getenv("REQUEST_METHOD") != "",
+		}
+		envVarsProxyFuncValue = config.ProxyFunc()
+	})
+	return envVarsProxyFuncValue
+}
+
+func SetNoProxyEnv(noProxy string) {
+	os.Setenv("NO_PROXY", noProxy)
+	os.Setenv("no_proxy", noProxy)
 }

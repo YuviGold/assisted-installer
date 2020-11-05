@@ -5,13 +5,15 @@
 package k8s_client
 
 import (
+	bytes "bytes"
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
 	v1alpha1 "github.com/metal3-io/baremetal-operator/pkg/apis/metal3/v1alpha1"
+	v1 "github.com/openshift/api/config/v1"
 	ops "github.com/openshift/assisted-installer/src/ops"
 	v1beta1 "k8s.io/api/certificates/v1beta1"
-	v1 "k8s.io/api/core/v1"
+	v10 "k8s.io/api/core/v1"
 )
 
 // MockK8SClient is a mock of K8SClient interface
@@ -38,10 +40,10 @@ func (m *MockK8SClient) EXPECT() *MockK8SClientMockRecorder {
 }
 
 // ListMasterNodes mocks base method
-func (m *MockK8SClient) ListMasterNodes() (*v1.NodeList, error) {
+func (m *MockK8SClient) ListMasterNodes() (*v10.NodeList, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListMasterNodes")
-	ret0, _ := ret[0].(*v1.NodeList)
+	ret0, _ := ret[0].(*v10.NodeList)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -81,10 +83,10 @@ func (mr *MockK8SClientMockRecorder) UnPatchEtcd() *gomock.Call {
 }
 
 // ListNodes mocks base method
-func (m *MockK8SClient) ListNodes() (*v1.NodeList, error) {
+func (m *MockK8SClient) ListNodes() (*v10.NodeList, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListNodes")
-	ret0, _ := ret[0].(*v1.NodeList)
+	ret0, _ := ret[0].(*v10.NodeList)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -140,10 +142,10 @@ func (mr *MockK8SClientMockRecorder) ListCsrs() *gomock.Call {
 }
 
 // GetConfigMap mocks base method
-func (m *MockK8SClient) GetConfigMap(namespace, name string) (*v1.ConfigMap, error) {
+func (m *MockK8SClient) GetConfigMap(namespace, name string) (*v10.ConfigMap, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetConfigMap", namespace, name)
-	ret0, _ := ret[0].(*v1.ConfigMap)
+	ret0, _ := ret[0].(*v10.ConfigMap)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
@@ -169,19 +171,34 @@ func (mr *MockK8SClientMockRecorder) GetPodLogs(namespace, podName, sinceSeconds
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPodLogs", reflect.TypeOf((*MockK8SClient)(nil).GetPodLogs), namespace, podName, sinceSeconds)
 }
 
-// GetPods mocks base method
-func (m *MockK8SClient) GetPods(namespace string, labelMatch map[string]string) ([]v1.Pod, error) {
+// GetPodLogsAsBuffer mocks base method
+func (m *MockK8SClient) GetPodLogsAsBuffer(namespace, podName string, sinceSeconds int64) (*bytes.Buffer, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetPods", namespace, labelMatch)
-	ret0, _ := ret[0].([]v1.Pod)
+	ret := m.ctrl.Call(m, "GetPodLogsAsBuffer", namespace, podName, sinceSeconds)
+	ret0, _ := ret[0].(*bytes.Buffer)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetPodLogsAsBuffer indicates an expected call of GetPodLogsAsBuffer
+func (mr *MockK8SClientMockRecorder) GetPodLogsAsBuffer(namespace, podName, sinceSeconds interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPodLogsAsBuffer", reflect.TypeOf((*MockK8SClient)(nil).GetPodLogsAsBuffer), namespace, podName, sinceSeconds)
+}
+
+// GetPods mocks base method
+func (m *MockK8SClient) GetPods(namespace string, labelMatch map[string]string, fieldSelector string) ([]v10.Pod, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetPods", namespace, labelMatch, fieldSelector)
+	ret0, _ := ret[0].([]v10.Pod)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // GetPods indicates an expected call of GetPods
-func (mr *MockK8SClientMockRecorder) GetPods(namespace, labelMatch interface{}) *gomock.Call {
+func (mr *MockK8SClientMockRecorder) GetPods(namespace, labelMatch, fieldSelector interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPods", reflect.TypeOf((*MockK8SClient)(nil).GetPods), namespace, labelMatch)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetPods", reflect.TypeOf((*MockK8SClient)(nil).GetPods), namespace, labelMatch, fieldSelector)
 }
 
 // IsMetalProvisioningExists mocks base method
@@ -240,4 +257,33 @@ func (m *MockK8SClient) UpdateBMH(bmh *v1alpha1.BareMetalHost) error {
 func (mr *MockK8SClientMockRecorder) UpdateBMH(bmh interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateBMH", reflect.TypeOf((*MockK8SClient)(nil).UpdateBMH), bmh)
+}
+
+// SetProxyEnvVars mocks base method
+func (m *MockK8SClient) SetProxyEnvVars() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetProxyEnvVars")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetProxyEnvVars indicates an expected call of SetProxyEnvVars
+func (mr *MockK8SClientMockRecorder) SetProxyEnvVars() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetProxyEnvVars", reflect.TypeOf((*MockK8SClient)(nil).SetProxyEnvVars))
+}
+
+// GetClusterVersion mocks base method
+func (m *MockK8SClient) GetClusterVersion(name string) (*v1.ClusterVersion, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetClusterVersion", name)
+	ret0, _ := ret[0].(*v1.ClusterVersion)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetClusterVersion indicates an expected call of GetClusterVersion
+func (mr *MockK8SClientMockRecorder) GetClusterVersion(name interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetClusterVersion", reflect.TypeOf((*MockK8SClient)(nil).GetClusterVersion), name)
 }

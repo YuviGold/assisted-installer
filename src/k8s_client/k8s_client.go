@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/openshift/assisted-installer/src/utils"
 	"k8s.io/apimachinery/pkg/labels"
@@ -17,6 +18,8 @@ import (
 
 	bmoapis "github.com/metal3-io/baremetal-operator/pkg/apis"
 	metal3v1alpha1 "github.com/metal3-io/baremetal-operator/pkg/apis/metal3/v1alpha1"
+	configv1 "github.com/openshift/api/config/v1"
+	configv1client "github.com/openshift/client-go/config/clientset/versioned/typed/config/v1"
 	operatorv1 "github.com/openshift/client-go/operator/clientset/versioned"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -47,11 +50,14 @@ type K8SClient interface {
 	ListCsrs() (*v1beta1.CertificateSigningRequestList, error)
 	GetConfigMap(namespace string, name string) (*v1.ConfigMap, error)
 	GetPodLogs(namespace string, podName string, sinceSeconds int64) (string, error)
-	GetPods(namespace string, labelMatch map[string]string) ([]v1.Pod, error)
+	GetPodLogsAsBuffer(namespace string, podName string, sinceSeconds int64) (*bytes.Buffer, error)
+	GetPods(namespace string, labelMatch map[string]string, fieldSelector string) ([]v1.Pod, error)
 	IsMetalProvisioningExists() (bool, error)
 	ListBMHs() (metal3v1alpha1.BareMetalHostList, error)
 	UpdateBMHStatus(bmh *metal3v1alpha1.BareMetalHost) error
 	UpdateBMH(bmh *metal3v1alpha1.BareMetalHost) error
+	SetProxyEnvVars() error
+	GetClusterVersion(name string) (*configv1.ClusterVersion, error)
 }
 
 type K8SClientBuilder func(configPath string, logger *logrus.Logger) (K8SClient, error)
@@ -62,7 +68,8 @@ type k8sClient struct {
 	ocClient      *operatorv1.Clientset
 	runtimeClient runtimeclient.Client
 	// CertificateSigningRequestInterface is interface
-	csrClient certificatesv1beta1client.CertificateSigningRequestInterface
+	csrClient   certificatesv1beta1client.CertificateSigningRequestInterface
+	proxyClient configv1client.ProxyInterface
 }
 
 func NewK8SClient(configPath string, logger *logrus.Logger) (K8SClient, error) {
@@ -79,13 +86,16 @@ func NewK8SClient(configPath string, logger *logrus.Logger) (K8SClient, error) {
 		return &k8sClient{}, errors.Wrap(err, "creating a Kubernetes client")
 	}
 	csrClient := client.CertificatesV1beta1().CertificateSigningRequests()
-
+	configClient, err := configv1client.NewForConfig(config)
+	if err != nil {
+		return &k8sClient{}, errors.Wrap(err, "creating openshift config client")
+	}
 	var runtimeClient runtimeclient.Client
 	if configPath == "" {
 		scheme := runtime.NewScheme()
 		err = clientgoscheme.AddToScheme(scheme)
 		if err != nil {
-			return &k8sClient{}, errors.Wrap(err, "faailed to add scheme to")
+			return &k8sClient{}, errors.Wrap(err, "failed to add scheme to")
 		}
 
 		var AddToSchemes runtime.SchemeBuilder
@@ -101,7 +111,8 @@ func NewK8SClient(configPath string, logger *logrus.Logger) (K8SClient, error) {
 		}
 	}
 
-	return &k8sClient{logger, client, ocClient, runtimeClient, csrClient}, nil
+	return &k8sClient{logger, client, ocClient, runtimeClient, csrClient,
+		configClient.Proxies()}, nil
 }
 
 func (c *k8sClient) ListMasterNodes() (*v1.NodeList, error) {
@@ -155,7 +166,7 @@ func (c *k8sClient) RunOCctlCommand(args []string, kubeconfigPath string, o ops.
 func (c k8sClient) ListCsrs() (*v1beta1.CertificateSigningRequestList, error) {
 	csrs, err := c.csrClient.List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		c.log.Errorf("Failed to get list of csrs. err : %e", err)
+		c.log.Errorf("Failed to get list of CSRs. err : %e", err)
 		return nil, err
 	}
 	return csrs, nil
@@ -170,7 +181,7 @@ func (c k8sClient) ApproveCsr(csr *v1beta1.CertificateSigningRequest) error {
 		LastUpdateTime: metav1.Now(),
 	})
 	if _, err := c.csrClient.UpdateApproval(context.TODO(), csr, metav1.UpdateOptions{}); err != nil {
-		c.log.Errorf("Failed to approve csr %v, err %e", csr, err)
+		c.log.Errorf("Failed to approve CSR %v, err %e", csr, err)
 		return err
 	}
 	return nil
@@ -184,13 +195,34 @@ func (c *k8sClient) GetConfigMap(namespace string, name string) (*v1.ConfigMap, 
 	return cm, nil
 }
 
-func (c *k8sClient) GetPods(namespace string, labelMatch map[string]string) ([]v1.Pod, error) {
+func (c *k8sClient) SetProxyEnvVars() error {
+	options := metav1.GetOptions{}
+	proxy, err := c.proxyClient.Get(context.TODO(), "cluster", options)
+	if err != nil {
+		return err
+	}
+	c.log.Infof("Using proxy %+v to set env-vars for installer-controller pod", proxy.Status)
+	if proxy.Status.HTTPProxy != "" {
+		os.Setenv("HTTP_PROXY", proxy.Status.HTTPProxy)
+	}
+	if proxy.Status.HTTPSProxy != "" {
+		os.Setenv("HTTPS_PROXY", proxy.Status.HTTPSProxy)
+	}
+	if proxy.Status.NoProxy != "" {
+		os.Setenv("NO_PROXY", proxy.Status.NoProxy)
+	}
+	return nil
+}
+
+func (c *k8sClient) GetPods(namespace string, labelMatch map[string]string, fieldSelector string) ([]v1.Pod, error) {
 	listOptions := metav1.ListOptions{}
 	if labelMatch != nil {
 		labelSelector := metav1.LabelSelector{MatchLabels: labelMatch}
 		listOptions.LabelSelector = labels.Set(labelSelector.MatchLabels).String()
 	}
-
+	if fieldSelector != "" {
+		listOptions.FieldSelector = fieldSelector
+	}
 	pod, err := c.client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
 	if err != nil {
 		return nil, err
@@ -200,6 +232,14 @@ func (c *k8sClient) GetPods(namespace string, labelMatch map[string]string) ([]v
 }
 
 func (c *k8sClient) GetPodLogs(namespace string, podName string, sinceSeconds int64) (string, error) {
+	buf, err := c.GetPodLogsAsBuffer(namespace, podName, sinceSeconds)
+	if err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func (c *k8sClient) GetPodLogsAsBuffer(namespace string, podName string, sinceSeconds int64) (*bytes.Buffer, error) {
 	podLogOpts := v1.PodLogOptions{}
 	if sinceSeconds > 0 {
 		podLogOpts.SinceSeconds = &sinceSeconds
@@ -207,17 +247,16 @@ func (c *k8sClient) GetPodLogs(namespace string, podName string, sinceSeconds in
 	req := c.client.CoreV1().Pods(namespace).GetLogs(podName, &podLogOpts)
 	podLogs, err := req.Stream(context.TODO())
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer podLogs.Close()
 
 	buf := new(bytes.Buffer)
 	_, err = io.Copy(buf, podLogs)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	return buf.String(), nil
+	return buf, nil
 }
 
 func (c *k8sClient) IsMetalProvisioningExists() (bool, error) {
@@ -263,4 +302,15 @@ func (c *k8sClient) UpdateBMHStatus(bmh *metal3v1alpha1.BareMetalHost) error {
 
 func (c *k8sClient) UpdateBMH(bmh *metal3v1alpha1.BareMetalHost) error {
 	return c.runtimeClient.Update(context.TODO(), bmh)
+}
+
+func (c *k8sClient) GetClusterVersion(name string) (*configv1.ClusterVersion, error) {
+	result := &configv1.ClusterVersion{}
+	err := c.client.RESTClient().Get().
+		AbsPath("/apis/config.openshift.io/v1").
+		Resource("clusterversions").
+		Name(name).
+		Do(context.Background()).
+		Into(result)
+	return result, err
 }

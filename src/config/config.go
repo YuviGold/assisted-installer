@@ -4,6 +4,8 @@ import (
 	"flag"
 	"os"
 
+	"github.com/openshift/assisted-installer/src/utils"
+
 	"github.com/openshift/assisted-service/models"
 )
 
@@ -25,6 +27,7 @@ type Config struct {
 	HTTPProxy            string
 	HTTPSProxy           string
 	NoProxy              string
+	ServiceIPs           string
 }
 
 var GlobalConfig Config
@@ -48,14 +51,19 @@ func ProcessArgs() {
 		"Assisted Installer Controller image URL")
 	flag.StringVar(&ret.AgentImage, "agent-image", "quay.io/ocpmetal/assisted-installer-agent:latest",
 		"Assisted Installer Agent image URL that will be used to send logs on successful installation")
-	flag.UintVar(&ret.InstallationTimeout, "installation-timeout", 120, "Installation timeout in minutes")
+	// Remove installation-timeout once the assisted-service stop sending it.
+	flag.UintVar(&ret.InstallationTimeout, "installation-timeout", 120, "Installation timeout in minutes - OBSOLETE")
 	flag.BoolVar(&ret.SkipCertVerification, "insecure", false, "Do not validate TLS certificate")
 	flag.StringVar(&ret.CACertPath, "cacert", "", "Path to custom CA certificate in PEM format")
 	flag.StringVar(&ret.HTTPProxy, "http-proxy", "", "A proxy URL to use for creating HTTP connections outside the cluster")
 	flag.StringVar(&ret.HTTPSProxy, "https-proxy", "", "A proxy URL to use for creating HTTPS connections outside the cluster")
 	flag.StringVar(&ret.NoProxy, "no-proxy", "", "A comma-separated list of destination domain names, domains, IP addresses, or other network CIDRs to exclude proxying")
+	flag.StringVar(&ret.ServiceIPs, "service-ips", "", "All IPs of assisted service node")
 	h := flag.Bool("help", false, "Help message")
 	flag.Parse()
+	if ret.NoProxy != "" {
+		utils.SetNoProxyEnv(ret.NoProxy)
+	}
 	if h != nil && *h {
 		printHelpAndExit()
 	}

@@ -8,7 +8,11 @@ spec:
     metadata:
       labels:
         app: assisted-installer-controller
-    spec:
+    spec:{{if .ServiceIPs}}
+      hostAliases:{{range .ServiceIPs}}
+        - ip: "{{.}}"
+          hostnames:
+            - "assisted-api.local.openshift.io"{{end}}{{end}}
       containers:
         - name: assisted-installer-controller
           image: {{.ControllerImage}}
@@ -45,10 +49,14 @@ spec:
                   name: assisted-installer-controller-config
                   key: skip-cert-verification
                   optional: true
-
           envFrom:
             - configMapRef:
                 name: assisted-installer-controller-config
+          {{if .CACertPath}}
+          volumeMounts:
+          - name: service-ca-cert-config
+            mountPath: {{.CACertPath}}
+          {{end}}
       restartPolicy: OnFailure
       nodeSelector:
         node-role.kubernetes.io/master: ""
@@ -57,3 +65,11 @@ spec:
       - key: node-role.kubernetes.io/master
         effect: NoSchedule
         operator: Exists
+      {{if .CACertPath}}
+      volumes:
+      - name: service-ca-cert-config
+        hostPath:
+          path: {{.CACertPath}}
+      {{end}}
+
+

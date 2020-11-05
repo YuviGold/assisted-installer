@@ -2,6 +2,7 @@ package inventory_client
 
 import (
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/jpillora/backoff"
@@ -10,11 +11,11 @@ import (
 
 // This type implements the http.RoundTripper interface
 type RetryRoundTripper struct {
-	Proxied  http.RoundTripper
-	log      *logrus.Logger
-	delay    time.Duration
-	maxDelay time.Duration
-	maxTries uint
+	Proxied    http.RoundTripper
+	log        *logrus.Logger
+	delay      time.Duration
+	maxDelay   time.Duration
+	maxRetries uint
 }
 
 func (rrt RetryRoundTripper) RoundTrip(req *http.Request) (res *http.Response, e error) {
@@ -25,19 +26,33 @@ func (rrt RetryRoundTripper) RoundTrip(req *http.Request) (res *http.Response, e
 		Factor: 2,
 		Jitter: false,
 	}
-	return rrt.retry(rrt.maxTries, b, rrt.Proxied.RoundTrip, req)
+	return rrt.retry(rrt.maxRetries, b, rrt.Proxied.RoundTrip, req)
 
 }
 
-func (rrt RetryRoundTripper) retry(maxTries uint, backoff *backoff.Backoff, fn func(req *http.Request) (res *http.Response, e error), req *http.Request) (res *http.Response, err error) {
+func (rrt RetryRoundTripper) retry(maxRetries uint, backoff *backoff.Backoff, fn func(req *http.Request) (res *http.Response, e error), req *http.Request) (res *http.Response, err error) {
 	var i uint
-	for i = 1; i <= maxTries; i++ {
+	for i = 1; i <= maxRetries; i++ {
 		res, err = fn(req)
-		if err != nil {
-			if i <= maxTries {
+		if err != nil || (res != nil && (res.StatusCode < 200 || res.StatusCode >= 300)) {
+			if i <= maxRetries {
 				delay := backoff.Duration()
-				rrt.log.WithError(err).Warnf("Failed executing HTTP call: %s %s, attempt number %d, Going to retry in: %s",
-					req.Method, req.URL, i, delay)
+
+				fields := logrus.Fields{
+					"method":      req.Method,
+					"url":         req.URL,
+					"attempt":     i,
+					"delay":       delay,
+					"HTTP_PROXY":  os.Getenv("HTTP_PROXY"),
+					"HTTPS_PROXY": os.Getenv("HTTPS_PROXY"),
+					"NO_PROXY":    os.Getenv("NO_PROXY"),
+				}
+
+				if res != nil {
+					fields["statusCode"] = res.StatusCode
+				}
+
+				rrt.log.WithFields(fields).WithError(err).Warn("Failed executing HTTP call")
 				time.Sleep(delay)
 			}
 		} else {
